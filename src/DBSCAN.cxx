@@ -22,7 +22,7 @@ DBSCANResult DBSCAN::cluster(const float* points, size_t n)
   }
 
   // Step 1: Find neighbors for all points using grid
-  std::vector<std::vector<size_t>> neighbors(n);
+  FlatNeighborList neighbors;
   findNeighbors(points, n, neighbors);
   // Step 2: Classify points and form clusters
   classify(n, neighbors, result.labels);
@@ -34,10 +34,10 @@ DBSCANResult DBSCAN::cluster(const float* points, size_t n)
   return result;
 }
 
-void DBSCAN::findNeighbors(const float* points, size_t n, std::vector<std::vector<size_t>>& neighbors)
+void DBSCAN::findNeighbors(const float* points, size_t n, FlatNeighborList& neighbors)
 {
   Grid grid(points, n, mParams.eps);
-  // DistanceComputer dist_computer(params_.dimensions, params_.eps);
+  std::vector<std::vector<size_t>> temp(n);
 
   // Parallel neighbor finding
   mTaskArena.execute([&] {
@@ -58,13 +58,23 @@ void DBSCAN::findNeighbors(const float* points, size_t n, std::vector<std::vecto
               }
             }
           }
-          mDistance.computeNeighbors(query, points, candidates, neighbors[i]);
+          mDistance.computeNeighbors(query, points, candidates, temp[i]);
         }
       });
   });
+  // flatten
+  neighbors.offsets.resize(n + 1);
+  neighbors.offsets[0] = 0;
+  for (size_t i = 0; i < n; ++i) {
+    neighbors.offsets[i + 1] = neighbors.offsets[i] + temp[i].size();
+  }
+  neighbors.indices.resize(neighbors.offsets[n]);
+  for (size_t i = 0; i < n; ++i) {
+    std::copy(temp[i].begin(), temp[i].end(), &neighbors.indices[neighbors.offsets[i]]);
+  }
 }
 
-void DBSCAN::classify(size_t n, const std::vector<std::vector<size_t>>& neighbors, std::vector<int32_t>& labels)
+void DBSCAN::classify(size_t n, const FlatNeighborList& neighbors, std::vector<int32_t>& labels)
 {
   std::vector<bool> isCore(n, false);
   int32_t nextClsIdx{0};
@@ -75,7 +85,7 @@ void DBSCAN::classify(size_t n, const std::vector<std::vector<size_t>>& neighbor
       tbb::blocked_range<size_t>(0, n),
       [&](const tbb::blocked_range<size_t>& range) {
         for (size_t i = range.begin(); i < range.end(); ++i) {
-          if (static_cast<int32_t>(neighbors[i].size()) >= mParams.minPts) {
+          if (static_cast<int32_t>(neighbors.getSize(i)) >= mParams.minPts) {
             isCore[i] = true;
           }
         }
@@ -104,7 +114,7 @@ void DBSCAN::classify(size_t n, const std::vector<std::vector<size_t>>& neighbor
   });
 }
 
-void DBSCAN::expandCluster(size_t i, int32_t idx, const std::vector<std::vector<size_t>>& neighbors, std::vector<int32_t>& labels) const
+void DBSCAN::expandCluster(size_t i, int32_t idx, const FlatNeighborList& neighbors, std::vector<int32_t>& labels) const
 {
   std::queue<size_t> seeds;
   seeds.push(i);
@@ -115,8 +125,8 @@ void DBSCAN::expandCluster(size_t i, int32_t idx, const std::vector<std::vector<
     seeds.pop();
 
     // If current is a core point, add its neighbors to the cluster
-    if (static_cast<int32_t>(neighbors[current].size()) >= mParams.minPts) {
-      for (auto neighbor : neighbors[current]) {
+    if (static_cast<int32_t>(neighbors.getSize(current)) >= mParams.minPts) {
+      for (auto neighbor : neighbors.getNeighbors(current)) {
         if (labels[neighbor] == DB_UNVISITED) {
           labels[neighbor] = idx;
           seeds.push(neighbor);

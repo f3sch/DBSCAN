@@ -2,7 +2,7 @@
 
 #include <vector>
 #include <cstdint>
-#include <limits>
+#include <span>
 #include <array>
 
 namespace dbscan
@@ -22,6 +22,20 @@ struct DBSCANResult {
   std::vector<int32_t> labels;
   int32_t nClusters = 0;
   int32_t nNoise = 0;
+};
+
+// Flat neighbor list
+struct FlatNeighborList {
+  std::vector<size_t> indices;
+  std::vector<size_t> offsets;
+  [[nodiscard]] size_t getSize(size_t i) const
+  {
+    return offsets[i + 1] - offsets[i];
+  }
+  [[nodiscard]] std::span<const size_t> getNeighbors(size_t i) const
+  {
+    return {&indices[offsets[i]], getSize(i)};
+  }
 };
 
 // Point classification

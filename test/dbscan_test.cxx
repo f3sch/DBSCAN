@@ -107,7 +107,7 @@ int main()
   std::cout << "DBSCAN CPU Implementation Test" << std::endl;
   std::cout << "================================================" << std::endl;
 
-  const size_t n_points = 100000;
+  const size_t n_points = 100'000;
   const float eps_space = 0.6f;
   const float eps_time = 0.6f;
   const int min_pts = 100;
