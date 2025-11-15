@@ -16,7 +16,7 @@ DBSCAN::DBSCAN(const DBSCANParams& p) : mParams(p), mDistance(mParams.eps)
 DBSCANResult DBSCAN::cluster(const float* points, size_t n)
 {
   DBSCANResult result;
-  result.labels.resize(n, DB_UNCLASSIFIED);
+  result.labels.resize(n, DB_UNVISITED);
   if (n == 0) {
     return result;
   }
@@ -67,7 +67,6 @@ void DBSCAN::findNeighbors(const float* points, size_t n, std::vector<std::vecto
 void DBSCAN::classify(size_t n, const std::vector<std::vector<size_t>>& neighbors, std::vector<int32_t>& labels)
 {
   std::vector<bool> isCore(n, false);
-  std::vector<bool> visited(n, false);
   int32_t nextClsIdx{0};
 
   mTaskArena.execute([&] {
@@ -84,12 +83,12 @@ void DBSCAN::classify(size_t n, const std::vector<std::vector<size_t>>& neighbor
 
     // Phase 2: Expand clusters from core points
     for (size_t i = 0; i < n; ++i) {
-      if (visited[i] || !isCore[i]) {
+      if (labels[i] != DB_UNVISITED || !isCore[i]) {
         continue;
       }
       // Start a new cluster
       int32_t idx = nextClsIdx++;
-      expandCluster(i, idx, neighbors, labels, visited);
+      expandCluster(i, idx, neighbors, labels);
     }
 
     // Phase 3: Mark non-visited points as noise
@@ -97,7 +96,7 @@ void DBSCAN::classify(size_t n, const std::vector<std::vector<size_t>>& neighbor
       tbb::blocked_range<size_t>(0, n),
       [&](const tbb::blocked_range<size_t>& range) {
         for (size_t i = range.begin(); i < range.end(); ++i) {
-          if (!visited[i]) {
+          if (labels[i] == DB_UNVISITED) {
             labels[i] = DB_NOISE;
           }
         }
@@ -105,11 +104,10 @@ void DBSCAN::classify(size_t n, const std::vector<std::vector<size_t>>& neighbor
   });
 }
 
-void DBSCAN::expandCluster(size_t i, int32_t idx, const std::vector<std::vector<size_t>>& neighbors, std::vector<int32_t>& labels, std::vector<bool>& visited) const
+void DBSCAN::expandCluster(size_t i, int32_t idx, const std::vector<std::vector<size_t>>& neighbors, std::vector<int32_t>& labels) const
 {
   std::queue<size_t> seeds;
   seeds.push(i);
-  visited[i] = true;
   labels[i] = idx;
 
   while (!seeds.empty()) {
@@ -119,8 +117,7 @@ void DBSCAN::expandCluster(size_t i, int32_t idx, const std::vector<std::vector<
     // If current is a core point, add its neighbors to the cluster
     if (static_cast<int32_t>(neighbors[current].size()) >= mParams.minPts) {
       for (auto neighbor : neighbors[current]) {
-        if (!visited[neighbor]) {
-          visited[neighbor] = true;
+        if (labels[neighbor] == DB_UNVISITED) {
           labels[neighbor] = idx;
           seeds.push(neighbor);
         } else if (labels[neighbor] == DB_NOISE) {

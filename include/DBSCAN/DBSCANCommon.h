@@ -27,7 +27,7 @@ struct DBSCANResult {
 // Point classification
 enum DBSCANLabel : int32_t {
   DB_NOISE = -(1 << 0),
-  DB_UNCLASSIFIED = -(1 << 1),
+  DB_UNVISITED = -(1 << 1),
   DB_BORDER = -(1 << 2),
   DB_CORE = -(1 << 3),
 };

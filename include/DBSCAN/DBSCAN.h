@@ -15,7 +15,7 @@ class DBSCAN
  private:
   void findNeighbors(const float*, size_t n, std::vector<std::vector<size_t>>& neighbors);
   void classify(size_t n, const std::vector<std::vector<size_t>>& neighbors, std::vector<int32_t>& labels);
-  void expandCluster(size_t i, int32_t idx, const std::vector<std::vector<size_t>>& neighbors, std::vector<int32_t>& labels, std::vector<bool>& visited) const;
+  void expandCluster(size_t i, int32_t idx, const std::vector<std::vector<size_t>>& neighbors, std::vector<int32_t>& labels) const;
 
   DBSCANParams mParams;
   DBSCANDistance mDistance;
