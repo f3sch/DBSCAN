@@ -4,6 +4,7 @@
 #include <tbb/parallel_for.h>
 #include <algorithm>
 #include <queue>
+#include <chrono>
 
 namespace dbscan
 {
@@ -22,120 +23,153 @@ DBSCANResult DBSCAN::cluster(const float* points, size_t n)
   }
 
   // Step 1: Find neighbors for all points using grid
-  FlatNeighborList neighbors;
-  findNeighbors(points, n, neighbors);
+  NeighborList neighbors;
+  {
+    SCOPED_TIMER("findNeighbors");
+    findNeighbors(points, n, neighbors);
+  }
   // Step 2: Classify points and form clusters
-  classify(n, neighbors, result.labels);
+  {
+    SCOPED_TIMER("Classification");
+    classify(n, neighbors, result.labels);
+  }
   // Step 3: Count clusters and noise points
-  int32_t max_label = *std::ranges::max_element(result.labels);
-  result.nClusters = max_label + 1;
-  result.nNoise = static_cast<int32_t>(std::count(result.labels.begin(), result.labels.end(), DB_NOISE));
+  {
+    SCOPED_TIMER("Assignment");
+    int32_t max_label = *std::ranges::max_element(result.labels);
+    result.nClusters = max_label + 1;
+    result.nNoise = static_cast<int32_t>(std::count(result.labels.begin(), result.labels.end(), DB_NOISE));
+  }
 
   return result;
 }
 
-void DBSCAN::findNeighbors(const float* points, size_t n, FlatNeighborList& neighbors)
+void DBSCAN::findNeighbors(const float* points, size_t n, NeighborList& neighbors)
 {
   Grid grid(points, n, mParams.eps);
-  std::vector<std::vector<size_t>> temp(n);
+  {
+    SCOPED_TIMER("\tinit grid");
+    grid.initGrid();
+  }
 
   // Parallel neighbor finding
   mTaskArena.execute([&] {
-    tbb::parallel_for(
-      tbb::blocked_range<size_t>(0, n), [&](const tbb::blocked_range<size_t>& range) {
-        std::vector<const GridCell*> neighbor_cells;
-        std::vector<size_t> candidates;
+    SCOPED_TIMER("\tneighbor finding");
+    neighbors.neighbors.resize(n);
 
-        for (size_t i = range.begin(); i < range.end(); ++i) {
-          const float* query = &points[i * NDim];
-          auto coords = grid.getGridCoords(i);
-          grid.getNeighborCells(coords, neighbor_cells);
-          candidates.clear();
-          for (const GridCell* cell : neighbor_cells) {
-            for (auto idx : *cell) {
-              if (idx != i) {
-                candidates.push_back(idx);
-              }
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n), [&](const tbb::blocked_range<size_t>& range) {
+      std::vector<const GridCell*> neighbor_cells;
+      neighbor_cells.reserve(NDim * NDim);
+
+      for (size_t i = range.begin(); i < range.end(); ++i) {
+        const float* query = &points[i * NDim];
+        auto coords = grid.getGridCoords(i);
+        grid.getNeighborCells(coords, neighbor_cells);
+
+        neighbors.neighbors[i].clear();
+        for (const GridCell* cell : neighbor_cells) {
+          for (auto idx : *cell) {
+            if (idx != i && mDistance.areNeighbors(query, &points[idx * NDim])) {
+              neighbors.neighbors[i].push_back(idx);
             }
           }
-          mDistance.computeNeighbors(query, points, candidates, temp[i]);
         }
-      });
+      }
+    });
   });
-  // flatten
-  neighbors.offsets.resize(n + 1);
-  neighbors.offsets[0] = 0;
-  for (size_t i = 0; i < n; ++i) {
-    neighbors.offsets[i + 1] = neighbors.offsets[i] + temp[i].size();
-  }
-  neighbors.indices.resize(neighbors.offsets[n]);
-  for (size_t i = 0; i < n; ++i) {
-    std::copy(temp[i].begin(), temp[i].end(), &neighbors.indices[neighbors.offsets[i]]);
+}
+
+namespace
+{
+inline size_t find(std::vector<std::atomic<size_t>>& parent, size_t x)
+{
+  while (true) {
+    size_t p = parent[x].load(std::memory_order_acquire);
+    if (p == x) {
+      return x;
+    }
+
+    // Path halving
+    size_t gp = parent[p].load(std::memory_order_acquire);
+    if (p == gp) {
+      return p;
+    }
+
+    parent[x].compare_exchange_weak(p, gp, std::memory_order_release);
+    x = p;
   }
 }
 
-void DBSCAN::classify(size_t n, const FlatNeighborList& neighbors, std::vector<int32_t>& labels)
+inline void unite(std::vector<std::atomic<size_t>>& parent, size_t x, size_t y)
 {
+  while (true) {
+    x = find(parent, x);
+    y = find(parent, y);
+    if (x == y) {
+      return;
+    }
+
+    if (x > y) {
+      std::swap(x, y); // Smaller root wins
+    }
+
+    size_t expected = y;
+    if (parent[y].compare_exchange_strong(expected, x, std::memory_order_acq_rel)) {
+      return;
+    }
+  }
+}
+} // namespace
+
+void DBSCAN::classify(size_t n, const NeighborList& neighbors, std::vector<int32_t>& labels) const
+{
+  std::vector<std::atomic<size_t>> parent(n);
   std::vector<bool> isCore(n, false);
-  int32_t nextClsIdx{0};
 
-  mTaskArena.execute([&] {
-    // Phase 1: Mark core points
-    tbb::parallel_for(
-      tbb::blocked_range<size_t>(0, n),
-      [&](const tbb::blocked_range<size_t>& range) {
-        for (size_t i = range.begin(); i < range.end(); ++i) {
-          if (static_cast<int32_t>(neighbors.getSize(i)) >= mParams.minPts) {
-            isCore[i] = true;
-          }
-        }
-      });
+  // Phase 1: Initialize + mark core points (already parallel)
+  {
+    SCOPED_TIMER("\tinit core points");
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n),
+                      [&](const auto& range) {
+                        for (size_t i = range.begin(); i < range.end(); ++i) {
+                          parent[i].store(i, std::memory_order_relaxed);
+                          isCore[i] = neighbors.getSize(i) >= mParams.minPts;
+                        }
+                      });
+  }
 
-    // Phase 2: Expand clusters from core points
-    for (size_t i = 0; i < n; ++i) {
-      if (labels[i] != DB_UNVISITED || !isCore[i]) {
-        continue;
-      }
-      // Start a new cluster
-      int32_t idx = nextClsIdx++;
-      expandCluster(i, idx, neighbors, labels);
-    }
+  // Phase 2: Parallel union of core-to-neighbor edges
+  {
+    SCOPED_TIMER("\tunion");
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n),
+                      [&](const auto& range) {
+                        for (size_t i = range.begin(); i < range.end(); ++i) {
+                          if (!isCore[i]) {
+                            continue;
+                          }
 
-    // Phase 3: Mark non-visited points as noise
-    tbb::parallel_for(
-      tbb::blocked_range<size_t>(0, n),
-      [&](const tbb::blocked_range<size_t>& range) {
-        for (size_t i = range.begin(); i < range.end(); ++i) {
-          if (labels[i] == DB_UNVISITED) {
-            labels[i] = DB_NOISE;
-          }
-        }
-      });
-  });
-}
+                          for (size_t neighbor : neighbors.getNeighbors(i)) {
+                            // Union core point with all neighbors
+                            unite(parent, i, neighbor);
+                          }
+                        }
+                      });
+  }
 
-void DBSCAN::expandCluster(size_t i, int32_t idx, const FlatNeighborList& neighbors, std::vector<int32_t>& labels) const
-{
-  std::queue<size_t> seeds;
-  seeds.push(i);
-  labels[i] = idx;
-
-  while (!seeds.empty()) {
-    size_t current = seeds.front();
-    seeds.pop();
-
-    // If current is a core point, add its neighbors to the cluster
-    if (static_cast<int32_t>(neighbors.getSize(current)) >= mParams.minPts) {
-      for (auto neighbor : neighbors.getNeighbors(current)) {
-        if (labels[neighbor] == DB_UNVISITED) {
-          labels[neighbor] = idx;
-          seeds.push(neighbor);
-        } else if (labels[neighbor] == DB_NOISE) {
-          // Border point - add to cluster but don't expand
-          labels[neighbor] = idx;
-        }
-      }
-    }
+  // Phase 3: Path compression + assign labels
+  {
+    SCOPED_TIMER("\tpath compression");
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n),
+                      [&](const auto& range) {
+                        for (size_t i = range.begin(); i < range.end(); ++i) {
+                          size_t root = find(parent, i);
+                          if (isCore[root]) {
+                            labels[i] = static_cast<int32_t>(root); // Use root as cluster ID (remap later)
+                          } else {
+                            labels[i] = DB_NOISE;
+                          }
+                        }
+                      });
   }
 }
 

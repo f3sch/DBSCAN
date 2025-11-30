@@ -1,9 +1,11 @@
 #pragma once
 
+#include <iomanip>
 #include <vector>
 #include <cstdint>
 #include <span>
 #include <array>
+#include <iostream>
 
 namespace dbscan
 {
@@ -24,18 +26,17 @@ struct DBSCANResult {
   int32_t nNoise = 0;
 };
 
-// Flat neighbor list
-struct FlatNeighborList {
-  std::vector<size_t> indices;
-  std::vector<size_t> offsets;
-  [[nodiscard]] size_t getSize(size_t i) const
+// neighbor list
+struct NeighborList {
+  [[nodiscard]] int32_t getSize(size_t i) const
   {
-    return offsets[i + 1] - offsets[i];
+    return static_cast<int32_t>(neighbors[i].size());
   }
-  [[nodiscard]] std::span<const size_t> getNeighbors(size_t i) const
+  [[nodiscard]] const auto& getNeighbors(size_t i) const
   {
-    return {&indices[offsets[i]], getSize(i)};
+    return neighbors[i];
   }
+  std::vector<std::vector<size_t>> neighbors;
 };
 
 // Point classification
@@ -45,5 +46,28 @@ enum DBSCANLabel : int32_t {
   DB_BORDER = -(1 << 2),
   DB_CORE = -(1 << 3),
 };
+
+#define MEASURE_TIMING
+#ifdef MEASURE_TIMING
+class ScopedTimer
+{
+  std::string_view name;
+  std::chrono::high_resolution_clock::time_point start;
+
+ public:
+  explicit ScopedTimer(std::string_view name)
+    : name(name), start(std::chrono::high_resolution_clock::now()) {}
+
+  ~ScopedTimer()
+  {
+    auto end = std::chrono::high_resolution_clock::now();
+    double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+    std::cout << name << " : " << std::fixed << std::setprecision(2) << elapsed_ms << " ms\n";
+  }
+};
+#define SCOPED_TIMER(name) ScopedTimer _timer##__LINE__(name)
+#else
+#define SCOPED_TIMER(name) ((void)0)
+#endif
 
 } // namespace dbscan

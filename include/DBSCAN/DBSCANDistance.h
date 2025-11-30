@@ -15,7 +15,7 @@ class DBSCANDistance
 
   // Check if two points are neighbors using L-infinity distance
   // Returns true if ALL dimensions are within their respective thresholds
-  bool areNeighbors(const float* p1, const float* p2) const
+  inline bool areNeighbors(const float* p1, const float* p2) const
   {
 #pragma unroll(NDim)
     for (size_t d{0}; d < NDim; ++d) {
@@ -31,7 +31,6 @@ class DBSCANDistance
   void computeNeighbors(const float* query, const float* points, const std::vector<size_t>& candidates, std::vector<size_t>& neighbors) const
   {
     neighbors.clear();
-    neighbors.reserve(candidates.size());
     for (auto idx : candidates) {
       const float* p = &points[idx * NDim];
       if (areNeighbors(query, p)) {

@@ -22,12 +22,26 @@ class Grid
 {
  public:
   Grid(const float* points, size_t n, const std::array<float, NDim>& cellSizes)
-    : mPoints(points), mNPoints(n), mCellSizes(cellSizes)
+    : mPoints(points), mNPoints(n), mCellSizes(cellSizes) {}
+
+  void initGrid()
   {
-    computeBounds();
-    computeGridDimensions();
-    allocateCells();
-    assignCells();
+    {
+      SCOPED_TIMER("\t\tcomputeBounds");
+      computeBounds();
+    }
+    {
+      SCOPED_TIMER("\t\tcomputeGridDimensions");
+      computeGridDimensions();
+    }
+    {
+      SCOPED_TIMER("\t\tallocateCells");
+      allocateCells();
+    }
+    {
+      SCOPED_TIMER("\t\tassignCells");
+      assignCells();
+    }
   }
 
   // Get grid coordinates for a point
